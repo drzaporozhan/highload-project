@@ -29,12 +29,12 @@
 Россия + страны СНГ.
 
 #### Размер аудитории (ориентир — Ozon)
-- **MAU:** 65+ млн [1]
-- **DAU:** ~9 млн [2]
+- **MAU:** 65+ млн [1](https://www.retail.ru/news/ozon-stal-liderom-po-mesyachnoy-auditorii-v-rossiyskom-e-commerce-v-iyule/)
+- **DAU:** ~9 млн [2](https://tass.ru/ekonomika/11649693)
 
 #### Объёмы данных/контента 
-- **Ассортимент:** порядка 19 млн товарных наименований [2]
-- **Заказы:** 334,8 млн заказов за Q2 2024 [3]
+- **Ассортимент:** порядка 19 млн товарных наименований [2](https://tass.ru/ekonomika/11649693)
+- **Заказы:** 334,8 млн заказов за Q2 2024 [3](https://cdn.financemarker.ru/reports/2024/MOEX/O/OZON_2024_6_6M_%D0%9C%D0%A1%D0%A4%D0%9E_press.pdf)
 
 ---
 
