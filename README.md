@@ -248,11 +248,8 @@ CDN (картинки):
 |-----------------------|----------------------------|-------------------------------------------------------------|
 | Web                   | www.marketplace.ru         | сайт/SPA                                                    |
 | Buyer API             | api.marketplace.ru         | покупательские действия (поиск, карточка, избранное, заказ) |
-| Search                | search.marketplace.ru      | поиск/подсказки/фильтры                                     |
 | Seller API            | seller.marketplace.ru      | контент и управление товарами (цены/загрузка)               |
 | Media CDN             | img.marketplace.ru         | выдача картинок                                             |
-| Upload init           | upload.marketplace.ru      | инициация загрузки (получить upload URL, метаданные)        |
-| Object storage origin | s3.internal.marketplace.ru | хранение медиа                                              |
 
 ## Расположение ДЦ
 
