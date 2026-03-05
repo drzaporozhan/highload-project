@@ -197,8 +197,8 @@ Search index:
 ### Сетевой трафик
 
 Для трафика задаём средний размер “события” (request+response):
-- search_api = 31 KB
-- product_view_api = 51 KB
+- search_api = 260 KB
+- product_view_api = 358 KB
 - favorite_api = 1 KB
 - order_api = 10 KB
 - seller_new_product_api = 10 KB
@@ -214,17 +214,17 @@ CDN (картинки):
 - GB_per_day = (count_per_day * bytes_per_event) / 10^9
 - Peak_Gbps = Avg_Gbps * k_peak (k_peak = 2.5)
 
-| Тип трафика                    | Events/day | Avg bytes/event |          Avg | Peak (k=2.5) |    Volume/day |
-|--------------------------------|-----------:|----------------:|-------------:|-------------:|--------------:|
-| API: Search                    |     32,48M |            31KB | 0.095 Gbit/s | 0.239 Gbit/s |   1.01 TB/day |
-| API: Product view              |      8,84M |            51KB | 0.043 Gbit/s | 0.107 Gbit/s | 461.66 GB/day |
-| API: Favorites                 |      3,98M |             1KB |    0.38 Mb/s |    0.94 Mb/s |   4.08 GB/day |
-| API: Order create              |      3,68M |            10KB |    3.49 Mb/s |    8.72 Mb/s |  37.68 GB/day |
-| API: Seller create product     |      1,00M |            10KB |    0.95 Mb/s |    2.37 Mb/s |  10.24 GB/day |
-| API: Seller price update       |     21,60M |             1KB |    2.05 Mb/s |    5.12 Mb/s |  22.12 GB/day |
-| Upload: Seller image (ingress) |      6,00M |           301KB | 0.171 Gbit/s | 0.428 Gbit/s |   1.81 TB/day |
-| CDN: Thumbnails in search      |     32,48M |           500KB | 1.540 Gbit/s | 3.849 Gbit/s |  16.24 TB/day |
-| CDN: Product images in PDP     |      8,84M |          1.22MB | 1.048 Gbit/s | 2.619 Gbit/s |  11.05 TB/day |
+| Тип трафика                    | Events/day | Avg bytes/event |          Avg | Peak (k=2.5) |   Volume/day |
+|--------------------------------|-----------:|----------------:|-------------:|-------------:|-------------:|
+| API: Search                    |     32,48M |           260KB | 0.801 Gbit/s | 2.002 Gbit/s |  8.44 TB/day |
+| API: Product view              |      8,84M |           358KB |   0.3 Gbit/s |  0.75 Gbit/s |  3.16 TB/day |
+| API: Favorites                 |      3,98M |             1KB |    0.38 Mb/s |    0.94 Mb/s |  4.08 GB/day |
+| API: Order create              |      3,68M |            10KB |    3.49 Mb/s |    8.72 Mb/s | 37.68 GB/day |
+| API: Seller create product     |      1,00M |            10KB |    0.95 Mb/s |    2.37 Mb/s | 10.24 GB/day |
+| API: Seller price update       |     21,60M |             1KB |    2.05 Mb/s |    5.12 Mb/s | 22.12 GB/day |
+| Upload: Seller image (ingress) |      6,00M |           301KB | 0.171 Gbit/s | 0.428 Gbit/s |  1.81 TB/day |
+| CDN: Thumbnails in search      |     32,48M |           500KB | 1.540 Gbit/s | 3.849 Gbit/s | 16.24 TB/day |
+| CDN: Product images in PDP     |      8,84M |          1.22MB | 1.048 Gbit/s | 2.619 Gbit/s | 11.05 TB/day |
 
 ## Источники
 1. https://mediascope.net/upload/iblock/9da/f39jd547adzptf0mu2j1tlmw44pjgt5d/Mediascope_НРФ_6%20суток.pdf
@@ -270,3 +270,67 @@ CDN (картинки):
 
 ## Источники
 1. https://tass.ru/obschestvo/20338789
+
+## Локальная балансировка нагрузки
+
+### Схема
+Вход в ДЦ осуществляется через внешний управляемый L4-балансировщик (провайдер). Он предоставляет стабильную точку входа и выполняет L4 балансировку TCP на пул L7-балансировщиков внутри ДЦ. L7-балансировщики (NGINX Ingress) выполняют SSL termination и L7 routing в Kubernetes-кластер.
+
+![local.png](local.png)
+
+Через контур локальной балансировки ДЦ проходит трафик доменов:
+- `api/*` (поиск, просмотр карточки, заказы)
+- `upload/*` (загрузка изображений продавцом)
+
+Отдача пользовательских изображений и миниатюр выполняется через CDN и не является лимитатором L7-балансировщиков внутри ДЦ.
+
+### Резервирование
+**L4 (внешний, провайдерский)** [[2]](https://docs.selectel.ru/en/load-balancer/about/about-load-balancer/)
+- Отказоустойчивость точки входа и L4-балансировки обеспечивается провайдером.
+- L4 выполняет health-check L7-пула и исключает недоступные L7 из балансировки.
+
+**L7 (ingress + SSL termination)**
+- L7-балансировщики развёрнуты в количестве, достаточном для выдерживания пиковой нагрузки и отказа одного узла.
+- Используется схема резервирования **N+1**.
+
+### Расчёт количества L7-балансировщиков
+
+#### Входные данные (пик)
+- `RPS_peak_total = 25 925 RPS`
+- Пиковый сетевой трафик через ingress (API+upload, без CDN): `BW_peak_ingress ≈ 3.20 Gbit/s`
+
+#### 1) Ограничитель SSL termination
+Приняты параметры:
+- доля новых TLS-соединений в пике: `k_new = 0.2`
+- целевая загрузка узла: `u = 0.6` [[2]](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/)
+- профиль узла L7: 16 vCPU [[3]](https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers)
+- производительность NGINX для HTTPS: `CPS_node ≈ 6 676 CPS` [[3]](https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers)
+
+Расчёт:
+`TLS_CPS_req = RPS_peak_total * k_new = 5 185 CPS`  
+`CPS_eff = CPS_node * u =4 006 CPS`  
+`N_ssl = ceil(TLS_CPS_req / CPS_eff) = 2`  
+С резервированием N+1:
+`N_l7_total = N_ssl + 1 = 3`
+
+#### 2) Ограничитель сети
+Приняты параметры:
+- NIC узла L7: `10 Gbit/s` [[3]](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes )
+- безопасная загрузка: `0.7`
+
+Расчёт:
+`BW_eff_node = 10 * 0.7 = 7 Gbit/s`  
+`N_net = ceil(BW_peak_ingress / BW_eff_node)= 1`  
+С резервированием N+1:
+`N_net_total = N_net + 1 = 2`
+
+#### Итог
+- по SSL: `3` узла
+- по сети: `2` узла
+Итого: **L7 (Ingress + SSL termination) = 3 узла (N+1)**.
+
+
+1. https://docs.selectel.ru/en/load-balancer/about/about-load-balancer/
+2. https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/
+2. https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers
+3. https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes
