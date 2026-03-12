@@ -301,14 +301,14 @@ CDN (картинки):
 
 #### 1) Ограничитель SSL termination
 Приняты параметры:
-- доля новых TLS-соединений в пике: `k_new = 0.2`
-- целевая загрузка узла: `u = 0.6` [[2]](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/)
+- доля новых TLS-соединений в пике: `k_new = 0.25`
+- целевая загрузка узла: `u = 0.5` [[2]](https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/)
 - профиль узла L7: 16 vCPU [[3]](https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers)
 - производительность NGINX для HTTPS: `CPS_node ≈ 6 676 CPS` [[3]](https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers)
 
 Расчёт:
-`TLS_CPS_req = RPS_peak_total * k_new = 5 185 CPS`  
-`CPS_eff = CPS_node * u =4 006 CPS`  
+`TLS_CPS_req = RPS_peak_total * k_new = 6 481 CPS`  
+`CPS_eff = CPS_node * u = 3 338 CPS`  
 `N_ssl = ceil(TLS_CPS_req / CPS_eff) = 2`  
 С резервированием N+1:
 `N_l7_total = N_ssl + 1 = 3`
