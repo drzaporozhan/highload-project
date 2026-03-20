@@ -444,59 +444,34 @@ CDN (картинки):
 
 ### Индексы
 
-| Сущность               | Индекс / структура                                        | Тип                         | Unique | Описание                                    |
-|------------------------|-----------------------------------------------------------|-----------------------------|--------|---------------------------------------------|
-| `users`                | `pk_users(id)`                                            | B-tree                      | да     | основной доступ по пользователю             |
-| `users`                | `idx_users_status(status)`                                | B-tree                      | нет    | выборка пользователей по статусу            |
-| `users`                | `idx_users_email(email)`                                  | B-tree                      | нет    | поиск по email                              |
-| `users`                | `idx_users_phone(phone)`                                  | B-tree                      | нет    | поиск по телефону                           |
-| `user_addresses`       | `pk_user_addresses(id)`                                   | B-tree                      | да     | точечное чтение адреса                      |
-| `user_addresses`       | `idx_user_addresses_user_id(user_id)`                     | B-tree                      | нет    | список адресов пользователя                 |
-| `sellers`              | `pk_sellers(id)`                                          | B-tree                      | да     | точечное чтение продавца                    |
-| `sellers`              | `idx_sellers_status(status)`                              | B-tree                      | нет    | выборки активных продавцов                  |
-| `categories`           | `pk_categories(id)`                                       | B-tree                      | да     | точечное чтение категории                   |
-| `categories`           | `idx_categories_parent_id(parent_id)`                     | B-tree                      | нет    | построение дерева категорий                 |
-| `categories`           | `idx_categories_slug(slug)`                               | B-tree                      | да     | доступ по человекочитаемому идентификатору  |
-| `product_listings`     | `pk_product_listings(id)`                                 | B-tree                      | да     | основной доступ к карточке                  |
-| `product_listings`     | `idx_product_listings_seller_id(seller_id)`               | B-tree                      | нет    | список товаров продавца                     |
-| `product_listings`     | `idx_product_listings_category_id(category_id)`           | B-tree                      | нет    | выборки по категории                        |
-| `product_listings`     | `idx_product_listings_status(status)`                     | B-tree                      | нет    | выборки активных / скрытых карточек         |
-| `product_listings`     | `idx_product_listings_category_price(category_id, price)` | B-tree                      | нет    | выборки по категории и цене                 |
-| `media_objects`        | `pk_media_objects(id)`                                    | B-tree                      | да     | точечное чтение метаданных                  |
-| `media_objects`        | `idx_media_objects_listing_id(listing_id)`                | B-tree                      | нет    | список файлов карточки                      |
-| `media_objects`        | `idx_media_objects_storage_key(storage_key)`              | B-tree                      | да     | уникальность объекта в файловом хранилище   |
-| `media_binary_objects` | `pk_media_binary_objects(storage_key)`                    | B-tree                      | да     | основной доступ к бинарному объекту         |
-| `media_binary_objects` | `idx_media_binary_objects_bucket_name(bucket_name)`       | B-tree                      | нет    | служебные выборки внутри bucket             |
-| `orders`               | `pk_orders(id)`                                           | B-tree                      | да     | основной доступ к заказу                    |
-| `orders`               | `ux_orders_idempotency_key(idempotency_key)`              | B-tree                      | да     | защита от повторного создания заказа        |
-| `orders`               | `idx_orders_user_id(user_id)`                             | B-tree                      | нет    | история заказов пользователя                |
-| `orders`               | `idx_orders_address_id(address_id)`                       | B-tree                      | нет    | выборки по адресу доставки                  |
-| `orders`               | `idx_orders_status(status)`                               | B-tree                      | нет    | служебные выборки по статусу                |
-| `orders`               | `idx_orders_created_at(created_at)`                       | B-tree                      | нет    | выборки по времени создания                 |
-| `order_items`          | `pk_order_items(id)`                                      | B-tree                      | да     | точечное чтение позиции                     |
-| `order_items`          | `idx_order_items_order_id(order_id)`                      | B-tree                      | нет    | состав заказа                               |
-| `order_items`          | `idx_order_items_listing_id(listing_id)`                  | B-tree                      | нет    | выборки по товару                           |
-| `order_items`          | `idx_order_items_seller_id(seller_id)`                    | B-tree                      | нет    | выборки по продавцу                         |
-| `search_index`         | `doc_id = listing_id`                                     | document id                 | да     | точечное обновление документа               |
-| `search_index`         | `idx_search_index_seller_id(seller_id)`                   | inverted index / doc values | нет    | фильтрация по продавцу                      |
-| `search_index`         | `idx_search_index_category_id(category_id)`               | inverted index / doc values | нет    | фильтрация по категории                     |
-| `search_index`         | `idx_search_index_category_price(category_id, price)`     | inverted index / doc values | нет    | фильтрация и сортировка по категории и цене |
-| `search_cache`         | `pk_search_cache(cache_key)`                              | hash key                    | да     | основной доступ к записи кэша               |
-| `search_cache`         | `idx_search_cache_query_hash(query_hash)`                 | secondary key               | нет    | поиск кэша по нормализованному запросу      |
-| `search_cache`         | `idx_search_cache_expires_at(expires_at)`                 | secondary key               | нет    | очистка просроченных записей                |
-| `product_cache`        | `pk_product_cache(cache_key)`                             | hash key                    | да     | основной доступ к записи кэша               |
-| `product_cache`        | `idx_product_cache_listing_id(listing_id)`                | secondary key               | нет    | инвалидация кэша карточки                   |
-| `product_cache`        | `idx_product_cache_expires_at(expires_at)`                | secondary key               | нет    | очистка просроченных записей                |
-| `order_drafts`         | `pk_order_drafts(draft_key)`                              | hash key                    | да     | основной доступ к черновику                 |
-| `order_drafts`         | `idx_order_drafts_user_id(user_id)`                       | secondary key               | нет    | доступ к корзине пользователя               |
-| `order_drafts`         | `idx_order_drafts_status(status)`                         | secondary key               | нет    | служебные выборки по состоянию              |
-| `order_drafts`         | `idx_order_drafts_expires_at(expires_at)`                 | secondary key               | нет    | очистка просроченных черновиков             |
-| `media_tasks`          | `pk_media_tasks(id)`                                      | message key                 | да     | идентификатор задачи                        |
-| `media_tasks`          | `idx_media_tasks_media_object_id(media_object_id)`        | secondary key               | нет    | связь задачи с медиаобъектом                |
-| `media_tasks`          | `idx_media_tasks_status(status)`                          | secondary key               | нет    | выборка задач по состоянию                  |
-| `media_tasks`          | `idx_media_tasks_execute_after(execute_after)`            | secondary key               | нет    | отложенный запуск задач                     |
+Используются только минимально необходимые индексы: первичные ключи, ограничения уникальности и индексы под основные сценарии чтения. Полнотекстовый поиск и сложная фильтрация не обслуживаются индексами PostgreSQL и вынесены в `search_index` в OpenSearch.
 
-Тяжёлый полнотекстовый поиск и фильтрация не обслуживаются индексами в `product_listings` и полностью вынесены в `search_index`.
+| Сущность               | Индекс / структура                                                                                                            | Тип                         | Unique | Описание                                      |
+|------------------------|-------------------------------------------------------------------------------------------------------------------------------|-----------------------------|--------|-----------------------------------------------|
+| `users`                | `pk_users(id)`                                                                                                                | B-tree                      | да     | основной доступ по пользователю               |
+| `users`                | `ux_users_email(email)`                                                                                                       | B-tree                      | да     | поиск и контроль уникальности email           |
+| `users`                | `ux_users_phone(phone)`                                                                                                       | B-tree                      | да     | поиск и контроль уникальности телефона        |
+| `user_addresses`       | `pk_user_addresses(id)`                                                                                                       | B-tree                      | да     | точечное чтение адреса                        |
+| `user_addresses`       | `idx_user_addresses_user_id(user_id)`                                                                                         | B-tree                      | нет    | список адресов пользователя                   |
+| `sellers`              | `pk_sellers(id)`                                                                                                              | B-tree                      | да     | точечное чтение продавца                      |
+| `categories`           | `pk_categories(id)`                                                                                                           | B-tree                      | да     | точечное чтение категории                     |
+| `categories`           | `idx_categories_parent_id(parent_id)`                                                                                         | B-tree                      | нет    | построение дерева категорий                   |
+| `categories`           | `ux_categories_slug(slug)`                                                                                                    | B-tree                      | да     | доступ по slug                                |
+| `product_listings`     | `pk_product_listings(id)`                                                                                                     | B-tree                      | да     | основной доступ к карточке                    |
+| `product_listings`     | `idx_product_listings_seller_id(seller_id)`                                                                                   | B-tree                      | нет    | список товаров продавца                       |
+| `product_listings`     | `idx_product_listings_category_status_price(category_id, status, price)`                                                      | B-tree                      | нет    | выборки каталога по категории, статусу и цене |
+| `media_objects`        | `pk_media_objects(id)`                                                                                                        | B-tree                      | да     | точечное чтение метаданных                    |
+| `media_objects`        | `ux_media_objects_storage_key(storage_key)`                                                                                   | B-tree                      | да     | уникальность объекта в файловом хранилище     |
+| `media_objects`        | `idx_media_objects_listing_sort(listing_id, sort_order)`                                                                      | B-tree                      | нет    | выдача изображений карточки в нужном порядке  |
+| `media_binary_objects` | `pk_media_binary_objects(storage_key)`                                                                                        | B-tree                      | да     | основной доступ к бинарному объекту           |
+| `orders`               | `pk_orders(id)`                                                                                                               | B-tree                      | да     | основной доступ к заказу                      |
+| `orders`               | `ux_orders_idempotency_key(idempotency_key)`                                                                                  | B-tree                      | да     | защита от повторного создания заказа          |
+| `orders`               | `idx_orders_user_created(user_id, created_at desc)`                                                                           | B-tree                      | нет    | история заказов пользователя                  |
+| `order_items`          | `pk_order_items(id)`                                                                                                          | B-tree                      | да     | точечное чтение позиции                       |
+| `order_items`          | `idx_order_items_order_id(order_id)`                                                                                          | B-tree                      | нет    | состав заказа                                 |
+| `search_index`         | полнотекстовый индекс по `searchable_text` и индексируемые поля `seller_id`, `category_id`, `price`, `rating`, `availability` | inverted index / doc values | нет    | поиск, фильтры, сортировки и агрегации        |
+
+Для `search_cache`, `product_cache`, `order_drafts` и `media_tasks` отдельные SQL-индексы не выделяются, так как это технические сущности Redis Cluster и Kafka, где используются ключи доступа, TTL и partition key.
 
 ### Денормализация
 
