@@ -417,7 +417,7 @@ CDN (картинки):
 
 - `users`, `user_addresses` — PostgreSQL (`profile_db`);
 - `sellers`, `categories`, `product_listings`, `media_objects` — PostgreSQL (`catalog_db`);
-- `media_binary_objects` — MinIO;
+- `media_binary_objects` — Ceph RGW;
 - `orders`, `order_items` — PostgreSQL (`order_db`);
 - `search_index` — OpenSearch;
 - `search_cache`, `product_cache`, `order_drafts` — Redis Cluster;
@@ -433,7 +433,7 @@ CDN (картинки):
 | `categories`           | справочник                 | строковое транзакционное хранение             | PostgreSQL `catalog_db`, SSD   | нет                         | постоянно до административного изменения                                         | дерево категорий                          |
 | `product_listings`     | основная таблица           | строковое транзакционное хранение             | PostgreSQL `catalog_db`, SSD   | по `listing_id`             | пока карточка активна + 180 дней после архивирования                             | карточка предложения продавца             |
 | `media_objects`        | таблица метаданных         | строковое транзакционное хранение             | PostgreSQL `catalog_db`, SSD   | по `listing_id`             | пока карточка активна + 180 дней после архивирования                             | ключ объекта, тип, размер, порядок показа |
-| `media_binary_objects` | файловые данные            | объектное хранение                            | MinIO, HDD                     | нет на уровне приложения    | пока карточка активна + 180 дней после архивирования                             | оригиналы и производные изображения       |
+| `media_binary_objects` | файловые данные            | объектное хранение                            | Ceph RGW, HDD                  | нет на уровне приложения    | пока карточка активна + 180 дней после архивирования                             | оригиналы и производные изображения       |
 | `orders`               | основная таблица           | строковое транзакционное хранение             | PostgreSQL `order_db`, SSD     | по `user_id`                | 3 года                                                                           | шапка заказа                              |
 | `order_items`          | основная таблица           | строковое транзакционное хранение             | PostgreSQL `order_db`, SSD     | в том же шарде, что и заказ | 3 года                                                                           | позиции заказа                            |
 | `search_index`         | поисковая read-model       | документное хранение + инвертированный индекс | OpenSearch, NVMe               | по `listing_id`             | пока карточка активна; удаление из индекса не позднее 24 часов после деактивации | поиск, фильтры, сортировки                |
@@ -491,7 +491,6 @@ CDN (картинки):
 |-----------------|------------|-------------------|----------------------------------|--------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------|
 | `search_cache`  | Redis      | поиск             | 1 минута                         | кэш горячих поисковых запросов       | ~10 GB, рассчитывается как число уникальных горячих поисковых запросов в минуту × средний размер результата в кэше                                                                                                                                                                                                             | 70–80%            |
 | `product_cache` | Redis      | просмотр карточки | 5 минут, удаление при обновлении | кэш готовой карточки товара          | ~25 GB, рассчитывается как число одновременно горячих карточек × средний размер одной карточки в кэше                                                                                                                                                                                                                          | 85–95%            |
-| `order_drafts`  | Redis      | корзина, checkout | 30 дней                          | корзина и черновик оформления заказа | ~15 GB, рассчитывается как число активных корзин × средний размер одного черновика заказа                                                                                                                                                                                                                                      | 60–80%            |
 
 #### Буферы
 
@@ -522,7 +521,7 @@ CDN (картинки):
 | OpenSearch | HTTP / REST client                  | индексация и поисковые запросы |
 | Redis      | cluster-aware Redis client          | кэши и корзина                 |
 | Kafka      | producer / consumer client          | очереди и асинхронные буферы   |
-| MinIO      | S3 SDK                              | загрузка и чтение файлов       |
+| Ceph RGW   | S3 SDK                              | загрузка и чтение файлов       |
 
 ### Балансировка запросов / мультиплексирование подключений
 
@@ -534,7 +533,7 @@ CDN (картинки):
 | OpenSearch              | пакетная индексация через координатор | поиск через координатор                                    | кластер сам отправляет запрос в нужные shard            | поисковый контур                                            |
 | Redis                   | запись и чтение через cluster client  | запись и чтение через cluster client                       | запрос направляется по ключу в нужный slot              | кэширование и краткоживущие данные                          |
 | Kafka                   | producer пишет в ведущий раздел       | consumer group читает разделы                              | сообщение направляется в нужный раздел по ключу         | асинхронная доставка изменений                              |
-| MinIO                   | загрузка через S3 API                 | чтение через CDN и S3 gateway                              | раздача файлов вынесена из OLTP-контура                 | хранение и выдача изображений                               |
+| Ceph RGW                | загрузка через S3 API                 | чтение через CDN и S3 gateway                              | раздача файлов вынесена из OLTP-контура                 | хранение и выдача изображений                               |
 
 ### Схема резервного копирования
 
@@ -542,7 +541,7 @@ CDN (картинки):
 |-----------------------------------------------------------------|--------------------------------------------------------------------------------|----------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
 | PostgreSQL (`profile_db`, `catalog_db`, `order_db`)             | полная резервная копия базы данных и непрерывное сохранение журнала предзаписи | полная резервная копия ежедневно, журнал предзаписи сохраняется постоянно        | суточные копии — 30 дней, еженедельные копии — 8 недель, ежемесячные копии — 12 месяцев | восстановление на момент времени из полной копии и журнала предзаписи                                                                   |
 | OpenSearch (`search_index`)                                     | снимок индекса в объектное хранилище                                           | каждые 6 часов                                                                   | ежедневные снимки — 14 дней, еженедельные снимки — 8 недель                             | восстановление из снимка, затем при необходимости полная переиндексация                                                                 |
-| MinIO (`media_binary_objects`)                                  | версионирование объектов                                                       | постоянно                                                                        | версии удалённых и изменённых объектов — 30 дней                                        | восстановление файла из истории версий                                                                                                  |
+| Ceph RGW  (`media_binary_objects`)                              | версионирование объектов                                                       | постоянно                                                                        | версии удалённых и изменённых объектов — 30 дней                                        | восстановление файла из истории версий                                                                                                  |
 | Redis Cluster (`search_cache`, `product_cache`, `order_drafts`) | снимки памяти и журнал изменений                                               | снимок памяти каждые 15 минут, выгрузка ежедневного снимка в объектное хранилище | снимки памяти — 3 дня, ежедневные снимки — 14 дней                                      | быстрый запуск из последнего снимка; при полной потере кэш прогревается из основных хранилищ                                            |
 | Kafka (`media_tasks`)                                           | хранение сообщений в журнале брокеров в пределах заданного времени             | постоянно                                                                        | сообщения хранятся 3 дня                                                                | повторное чтение сообщений из очереди; при полной потере очередь пересоздаётся, производные данные повторно строятся из основных систем |
 
@@ -790,5 +789,40 @@ Buyer API, Redis Cluster `search_cache`.
 | **OpenSearch**               | `search_index`, поиск, фильтры, сортировки, ранжирование          | лучше подходит для полнотекстового поиска, чем OLTP-БД                        |
 | **Redis Cluster**            | `search_cache`, `product_cache`, `order_drafts`                   | даёт быстрый доступ к горячим данным и поддерживает TTL                       |
 | **Apache Kafka**             | `media_tasks`, асинхронная обработка изображений                  | отделяет фоновые задачи от пользовательского запроса и сглаживает пики        |
-| **MinIO**                    | `media_binary_objects`, хранение изображений                      | объектное хранилище лучше подходит для медиа, чем PostgreSQL                  |
+| **Ceph RGW**                 | `media_binary_objects`, хранение изображений                      | объектное хранилище лучше подходит для медиа, чем PostgreSQL                  |
 | **CDN**                      | выдача миниатюр и изображений пользователям                       | снимает медиа-нагрузку с ДЦ и ускоряет доставку контента                      |
+
+## 9. Обеспечение надёжности
+
+| Компонент / сервис | Схема резервирования | Работа при отказе | Примечание |
+|---|---|---|---|
+| Внешний входной контур (`DNS`, managed `L4`) | HA на стороне провайдера [[1]](https://docs.selectel.ru/en/cloud-servers/load-balancers/about-load-balancers/) | трафик остаётся доступен через исправные узлы провайдера | один ДЦ, меж-ДЦ резервирования нет |
+| L7 и Kubernetes | `NGINX Ingress` по схеме `N+1`; 3 control-plane; worker-узлы распределены по 3 availability zone / fault domain [[2]](https://kubernetes.io/docs/setup/best-practices/multiple-zones/) [[3]](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) | при отказе ingress-узла трафик идёт через оставшиеся; при отказе worker-ноды pod'ы перезапускаются в другой зоне | для ingress принято 3 узла |
+| `Buyer API` + статика | 3 реплики в разных availability zone | сервис продолжает работу при отказе pod'а, ноды или одной зоны | stateless; `Deployment`; readiness/liveness; topology spread [[3]](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) [[4]](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) [[5]](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/) |
+| `Seller API` | 2 реплики в разных availability zone | сервис продолжает работу через оставшуюся реплику | stateless; `Deployment`; readiness/liveness [[4]](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) [[5]](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/) |
+| `Media API` + workers | `Media API`: 2 реплики; workers: несколько consumer-экземпляров в одной consumer group по разным availability zone | API остаётся доступным, обработка продолжается оставшимися worker-ами | асинхронные задачи хранятся в Kafka [[14]](https://kafka.apache.org/42/design/design/) |
+| PostgreSQL (`profile_db`, `catalog_db`, `order_db`) | `Patroni` [[6]](https://github.com/patroni/patroni); `profile_db`: 1 primary + 2 replica; нешардируемая часть `catalog_db`: 1 primary + 1 replica; шардируемая часть `catalog_db`: 8 шардов, в каждом 1 primary + 1 replica; `order_db`: 16 шардов, в каждом 1 primary + 1 replica; перед БД — `PgBouncer` [[8]](https://www.pgbouncer.org/) | при отказе primary `Patroni` выполняет failover на реплику | синхронизация контролируется по состоянию `Patroni` и replication lag [[7]](https://patroni.readthedocs.io/en/latest/patronictl.html) |
+| OpenSearch (`search_index`) | 12 primary shard + 1 replica на каждый shard [[9]](https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-health/) | запросы продолжают обслуживаться replica-shard | состояние контролируется по cluster health и shard allocation [[9]](https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-health/) [[10]](https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-allocation/) |
+| Redis Cluster (`search_cache`, `product_cache`, `order_drafts`) | cluster sharding + replica для каждого master [[11]](https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/) | при отказе master его роль принимает replica | `Sentinel` не используется, так как выбран `Redis Cluster` [[11]](https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/) [[12]](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/); состояние контролируется по cluster state [[13]](https://redis.io/docs/latest/commands/cluster-info/) |
+| Kafka (`media_tasks`) | replication factor = 3 [[14]](https://kafka.apache.org/42/design/design/) | сообщения остаются доступны на других брокерах | контроль по ISR и consumer lag [[15]](https://kafka.apache.org/41/operations/monitoring/) |
+| Ceph RGW / объектное хранилище (`media_binary_objects`) | 2 `RGW` gateway; replicated pool, 3 копии объекта на разных storage-нодах [[16]](https://docs.ceph.com/en/latest/cephadm/services/rgw/) [[17]](https://docs.ceph.com/en/reef/rados/operations/pools/) | при отказе gateway запросы идут через второй; при отказе диска или storage-ноды данные сохраняются | хранение оригиналов и производных изображений |
+
+### Источники
+
+1. https://docs.selectel.ru/en/cloud-servers/load-balancers/about-load-balancers/
+2. https://kubernetes.io/docs/setup/best-practices/multiple-zones/
+3. https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
+4. https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+5. https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/
+6. https://github.com/patroni/patroni
+7. https://patroni.readthedocs.io/en/latest/patronictl.html
+8. https://www.pgbouncer.org/
+9. https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-health/
+10. https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-allocation/
+11. https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/
+12. https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/
+13. https://redis.io/docs/latest/commands/cluster-info/
+14. https://kafka.apache.org/42/design/design/
+15. https://kafka.apache.org/41/operations/monitoring/
+16. https://docs.ceph.com/en/latest/cephadm/services/rgw/
+17. https://docs.ceph.com/en/reef/rados/operations/pools/
