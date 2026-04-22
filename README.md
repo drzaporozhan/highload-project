@@ -801,7 +801,7 @@ Buyer API, Redis Cluster `search_cache`.
 | `Buyer API` + статика                                   | 3 реплики в разных availability zone                                                                                                                                                                                                                                                                                                         | сервис продолжает работу при отказе pod'а, ноды или одной зоны                                                   | stateless; `Deployment`; readiness/liveness; topology spread [[3]](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) [[4]](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) [[5]](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/) |
 | `Seller API`                                            | 2 реплики в разных availability zone                                                                                                                                                                                                                                                                                                         | сервис продолжает работу через оставшуюся реплику                                                                | stateless; `Deployment`; readiness/liveness [[4]](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/) [[5]](https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/)                                                                                                              |
 | `Media API` + workers                                   | `Media API`: 2 реплики; workers: несколько consumer-экземпляров в одной consumer group по разным availability zone                                                                                                                                                                                                                           | API остаётся доступным, обработка продолжается оставшимися worker-ами                                            | асинхронные задачи хранятся в Kafka [[14]](https://kafka.apache.org/42/design/design/)                                                                                                                                                                                                                                            |
-| PostgreSQL (`profile_db`, `catalog_db`, `order_db`)     | `Patroni` [[6]](https://github.com/patroni/patroni); `profile_db`: 1 primary + 2 replica; нешардируемая часть `catalog_db`: 1 primary + 1 replica; шардируемая часть `catalog_db`: 8 шардов, в каждом 1 primary + 1 replica; `order_db`: 16 шардов, в каждом 1 primary + 1 replica; перед БД — `PgBouncer` [[8]](https://www.pgbouncer.org/) | при отказе primary `Patroni` выполняет failover на реплику                                                       | синхронизация контролируется по состоянию `Patroni` и replication lag [[7]](https://patroni.readthedocs.io/en/latest/patronictl.html)                                                                                                                                                                                             |
+| PostgreSQL (`profile_db`, `catalog_db`, `order_db`)     | `Patroni` [[6]](https://github.com/patroni/patroni); `profile_db`: 1 primary + 2 replica; нешардируемая часть `catalog_db`: 1 primary + 2 replica; шардируемая часть `catalog_db`: 8 шардов, в каждом 1 primary + 2 replica; `order_db`: 16 шардов, в каждом 1 primary + 2 replica; перед БД — `PgBouncer` [[8]](https://www.pgbouncer.org/) | при отказе primary `Patroni` выполняет failover на реплику                                                       | синхронизация контролируется по состоянию `Patroni` и replication lag [[7]](https://patroni.readthedocs.io/en/latest/patronictl.html)                                                                                                                                                                                             |
 | OpenSearch (`search_index`)                             | 12 primary shard + 1 replica на каждый shard [[9]](https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-health/)                                                                                                                                                                                                             | запросы продолжают обслуживаться replica-shard                                                                   | состояние контролируется по cluster health и shard allocation [[9]](https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-health/) [[10]](https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-allocation/)                                                                                        |
 | Redis Cluster (`search_cache`, `product_cache`)         | 3 master + 3 replica; cluster sharding по hash slots [[11]](https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/)                                                                                                                                                                                                          | при отказе master его роль принимает replica                                                                     | `Sentinel` не используется, так как выбран `Redis Cluster` [[11]](https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/) [[12]](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/); состояние контролируется по cluster state [[13]](https://redis.io/docs/latest/commands/cluster-info/)  |
 | Kafka (`media_tasks`)                                   | replication factor = 3 [[14]](https://kafka.apache.org/42/design/design/)                                                                                                                                                                                                                                                                    | сообщения остаются доступны на других брокерах                                                                   | контроль по ISR и consumer lag [[15]](https://kafka.apache.org/41/operations/monitoring/)                                                                                                                                                                                                                                         |
@@ -826,3 +826,39 @@ Buyer API, Redis Cluster `search_cache`.
 15. https://kafka.apache.org/41/operations/monitoring/
 16. https://docs.ceph.com/en/latest/cephadm/services/rgw/
 17. https://docs.ceph.com/en/reef/rados/operations/pools/
+
+## 10. Схема проекта
+
+![scheme.png](scheme.png)
+
+### Пояснения к схеме
+
+**Обозначения стрелок на схеме:**
+- сплошная стрелка — синхронный запрос или синхронная запись;
+- пунктирная стрелка — асинхронный, фоновый или eventual-consistency поток.
+
+На схеме показаны основные сервисы проекта, потоки данных и два уровня балансировки: внешний и внутренний.
+
+**Внешняя балансировка** устроена следующим образом: пользователь сначала обращается к `DNS`.  
+Запросы к `api.marketplace.ru` и `seller.marketplace.ru` направляются во внешний `Managed L4 Load Balancer`, после чего попадают на `NGINX Ingress`, где выполняются `SSL termination` и `L7 routing`.  
+Запросы к `img.marketplace.ru` направляются в `CDN / Edge`.
+
+**Внутренняя балансировка** выполняется внутри Kubernetes.  
+После `NGINX Ingress` трафик поступает в `K8S Service` типа `ClusterIP`, который распределяет запросы между экземплярами приложений внутри кластера.  
+Далее запрос проходит через `API Gateway`, где выполняется маршрутизация, и через блок `Auth`, где проверяется авторизация пользователя.
+
+Для авторизации сначала используется быстрый контур сессий в `Redis Cluster`.  
+Если нужных данных в Redis нет, выполняется обращение через `PgBouncer` в профильную базу данных `profile_db`.
+
+`Buyer API` использует:
+- `OpenSearch` для поиска, фильтрации и сортировки;
+- `Redis Cluster` для кэширования;
+- PostgreSQL-контуры через `PgBouncer` для работы с профилем, каталогом и заказами.
+
+`Seller API` используется для управления каталогом и загрузки медиа.  
+Он работает с `catalog_db` через `PgBouncer`, обновляет поисковую проекцию в `OpenSearch`, сохраняет оригиналы файлов в объектное хранилище `Ceph RGW` и отправляет задачи обработки изображений в `Kafka`.
+
+`Media Worker` асинхронно читает задачи из `Kafka`, формирует производные изображения (`preview`, `thumbnail`) и сохраняет их обратно в `Ceph RGW`.
+
+Пользовательские изображения отдаются через `CDN`.  
+Если объекта нет в кэше, CDN выполняет `origin pull` из объектного хранилища.
