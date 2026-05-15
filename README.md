@@ -867,92 +867,88 @@ Buyer API, Redis Cluster `search_cache`.
 
 ### Модель размещения
 
-Проект размещается в одном датацентре `MSK`.
+Всё размещается в одном датацентре `MSK`.
 
-Принята смешанная модель:
-- `Managed L4 Load Balancer` и `CDN` — управляемые сервисы провайдера, в собственные серверы не входят;
-- stateless-сервисы размещаются в `Kubernetes`;
-- stateful-компоненты (`PostgreSQL`, `OpenSearch`, `Redis`, `Kafka`, `Ceph`) размещаются на отдельных серверных пулах вне Kubernetes;
-- серверы распределяются по трём fault domain внутри датацентра;
-- долговременное хранение данных внутри Kubernetes не используется.
+| Группа            | Модель размещения          | Принцип выбора                                                                                    |
+|-------------------|----------------------------|---------------------------------------------------------------------------------------------------|
+| Внешний вход      | `Managed L4 Load Balancer` | управляемый сервис провайдера, в собственные серверы не входит                                    |
+| CDN               | `CDN provider`             | выдача статики и изображений с edge, в собственные серверы не входит                              |
+| Stateless-сервисы | `Kubernetes`               | сервисы без локального состояния, допускают переезд между worker-нодами                           |
+| Stateful-сервисы  | отдельные серверные пулы   | БД, кэши, очереди и объектное хранилище требуют диска, репликации и стабильной производительности |
+| Fault domain      | `3` зоны внутри ДЦ         | реплики критичных компонентов разносятся по разным зонам отказа                                   |
 
-### Список серверов
+### Требования к ресурсам
+
+| Контур                  | Нагрузка / объём                                         | Расчётный ресурс     | Основание                                                                                                                                                                  |
+|-------------------------|----------------------------------------------------------|----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| L7 / SSL termination    | `25 925 RPS`, `≈ 3.20 Gbit/s`                            | `3` ingress-узла     | расчёт L7 из раздела локальной балансировки, схема `N+1`, benchmark NGINX [[1]](https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers)   |
+| Kubernetes backend      | Buyer API, Seller API, Media API, Gateway, Auth, workers | `6` app-worker узлов | stateless-сервисы, запас на отказ узла и rolling update                                                                                                                    |
+| PostgreSQL `profile_db` | профиль, контакты, адреса                                | `3` узла             | `1 primary + 2 replica` [[3]](https://www.postgresql.org/docs/current/high-availability.html)                                                                              |
+| PostgreSQL `catalog_db` | каталог, продавцы, media metadata                        | `12` узлов           | нешардируемая часть + `8` шардов каталога                                                                                                                                  |
+| PostgreSQL `order_db`   | `≈ 5.6 TB` заказов без индексов и репликации             | `24` узла            | `16` шардов по `user_id`, реплики разнесены по fault domain                                                                                                                |
+| Patroni DCS             | failover PostgreSQL                                      | `3` узла             | etcd-кворум для Patroni [[4]](https://patroni.readthedocs.io/)                                                                                                             |
+| OpenSearch              | `≈ 1.23 TB` индекса без реплик и overhead                | `9` узлов            | `3` master/coordinator + `6` data, primary/replica shard [[5]](https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-health/)                               |
+| Redis Cluster           | кэши, `order_drafts`, сессии Auth                        | `6` узлов            | `3 master + 3 replica` [[6]](https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/)                                                                       |
+| Kafka                   | `media_tasks`                                            | `3` брокера          | replication factor `3` [[7]](https://kafka.apache.org/42/design/design/)                                                                                                   |
+| Ceph RGW / OSD          | `≈ 368.64 TB` медиа                                      | `2` RGW + `15` OSD   | S3-compatible gateway + replicated pool size `3` [[8]](https://docs.ceph.com/en/latest/cephadm/services/rgw/) [[9]](https://docs.ceph.com/en/reef/rados/operations/pools/) |
+| Monitoring              | метрики, алерты, дашборды                                | `3` узла             | отдельный служебный контур                                                                                                                                                 |
+
+### Серверы
 
 | Пул / серверы                   | Размещение      | Конфигурация одного сервера                                        | Кол-во | Сервисы                                                                                    |
 |---------------------------------|-----------------|--------------------------------------------------------------------|-------:|--------------------------------------------------------------------------------------------|
-| `managed-l4`                    | managed service | провайдерский сервис                                               |      — | внешний L4-балансировщик, health-check L7-пула                                             |
-| `cdn-edge`                      | managed service | CDN-провайдер                                                      |      — | выдача изображений и статики                                                               |
 | `k8s-control-plane`             | VM              | `8 vCPU / 32 GB RAM / 200 GB SSD / 10 Gbit/s`                      |    `3` | Kubernetes API Server, scheduler, controller-manager, etcd                                 |
 | `k8s-ingress-pool`              | bare-metal      | `16 vCPU / 32 GB RAM / 2x960 GB NVMe / 2x10 Gbit/s`                |    `3` | `NGINX Ingress Controller`, SSL termination, L7 routing                                    |
 | `k8s-app-pool`                  | bare-metal      | `32 vCPU / 128 GB RAM / 2x1.92 TB NVMe / 2x25 Gbit/s`              |    `6` | `API Gateway`, `Auth`, `Buyer API`, `Seller API`, `Media API`, `Media Worker`, `PgBouncer` |
-| `pg-profile-db`                 | VM              | `8 vCPU / 32 GB RAM / 1 TB NVMe / 10 Gbit/s`                       |    `3` | PostgreSQL `profile_db`: `1 primary + 2 replica`                                           |
-| `pg-catalog-db`                 | bare-metal      | `16 vCPU / 64 GB RAM / 2 TB NVMe / 10 Gbit/s`                      |   `12` | PostgreSQL `catalog_db`: нешардируемая часть + `8` шардов каталога                         |
-| `pg-order-db`                   | bare-metal      | `16 vCPU / 64 GB RAM / 2 TB NVMe / 10 Gbit/s`                      |   `24` | PostgreSQL `order_db`: `16` шардов заказов по `user_id`                                    |
-| `patroni-etcd`                  | VM              | `2 vCPU / 8 GB RAM / 100 GB SSD / 1 Gbit/s`                        |    `3` | etcd-кворум для Patroni failover                                                           |
+| `pg-profile-db`                 | VM              | `8 vCPU / 32 GB RAM / 1 TB NVMe / 10 Gbit/s`                       |    `3` | PostgreSQL `profile_db`                                                                    |
+| `pg-catalog-db`                 | bare-metal      | `16 vCPU / 64 GB RAM / 2 TB NVMe / 10 Gbit/s`                      |   `12` | PostgreSQL `catalog_db`                                                                    |
+| `pg-order-db`                   | bare-metal      | `16 vCPU / 64 GB RAM / 2 TB NVMe / 10 Gbit/s`                      |   `24` | PostgreSQL `order_db`                                                                      |
+| `patroni-etcd`                  | VM              | `2 vCPU / 8 GB RAM / 100 GB SSD / 1 Gbit/s`                        |    `3` | etcd-кворум для Patroni                                                                    |
 | `opensearch-master-coordinator` | VM              | `8 vCPU / 32 GB RAM / 500 GB NVMe / 10 Gbit/s`                     |    `3` | OpenSearch master/coordinator nodes                                                        |
-| `opensearch-data`               | bare-metal      | `16 vCPU / 64 GB RAM / 4 TB NVMe / 10 Gbit/s`                      |    `6` | OpenSearch data nodes, `12 primary shard + 12 replica shard`                               |
-| `redis-cluster`                 | bare-metal      | `8 vCPU / 64 GB RAM / 500 GB NVMe / 10 Gbit/s`                     |    `6` | Redis Cluster: `3 master + 3 replica`                                                      |
-| `kafka-media`                   | bare-metal      | `8 vCPU / 32 GB RAM / 2 TB NVMe / 10 Gbit/s`                       |    `3` | Kafka brokers для `media_tasks`, replication factor `3`                                    |
-| `ceph-rgw`                      | VM              | `8 vCPU / 32 GB RAM / 500 GB SSD / 10 Gbit/s`                      |    `2` | S3-compatible gateway для объектов                                                         |
+| `opensearch-data`               | bare-metal      | `16 vCPU / 64 GB RAM / 4 TB NVMe / 10 Gbit/s`                      |    `6` | OpenSearch data nodes                                                                      |
+| `redis-cluster`                 | bare-metal      | `8 vCPU / 64 GB RAM / 500 GB NVMe / 10 Gbit/s`                     |    `6` | Redis Cluster                                                                              |
+| `kafka-media`                   | bare-metal      | `8 vCPU / 32 GB RAM / 2 TB NVMe / 10 Gbit/s`                       |    `3` | Kafka brokers для `media_tasks`                                                            |
+| `ceph-rgw`                      | VM              | `8 vCPU / 32 GB RAM / 500 GB SSD / 10 Gbit/s`                      |    `2` | S3-compatible gateway                                                                      |
 | `ceph-osd-storage`              | bare-metal      | `16 vCPU / 64 GB RAM / 12x8 TB HDD + 2x1.92 TB NVMe / 2x25 Gbit/s` |   `15` | Ceph OSD, хранение изображений                                                             |
 | `monitoring`                    | VM              | `8 vCPU / 32 GB RAM / 2 TB SSD / 10 Gbit/s`                        |    `3` | Prometheus, Grafana, Alertmanager                                                          |
 
-### Обоснование размещения
-
-- `k8s-ingress-pool` выделен отдельно, так как принимает внешний трафик и выполняет SSL termination. 
-Количество `3` соответствует ранее рассчитанной схеме `N+1`. Оценка L7 опирается на расчёт из раздела локальной балансировки и benchmark NGINX по HTTPS/CPS [[1]](https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers).
-- `k8s-app-pool` содержит stateless-сервисы, которые могут переезжать между worker-нодами. 
-Для распределения pod'ов по fault domain используются topology spread constraints [[2]](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/).
-- для PostgreSQL Используется схема primary/replica [[3]](https://www.postgresql.org/docs/current/high-availability.html), 
-а автоматический failover обеспечивается Patroni с DCS на etcd [[4]](https://patroni.readthedocs.io/).
-- OpenSearch разделён на master/coordinator и data nodes. Для отказоустойчивости поискового индекса используются primary и replica shards,
-распределенные по узлам [[5]](https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-health/).
-- Redis размещается как `Redis Cluster`, данные шардингом распределяются по cluster nodes, для отказоустойчивости используются replica [[6]](https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/).
-- Kafka размещается на `3` брокерах, так как журнал разделов может реплицироваться на заданное число серверов,
-для `media_tasks` выбран replication factor `3` [[7]](https://kafka.apache.org/42/design/design/).
-- `Ceph RGW` используется как S3-compatible gateway [[8]](https://docs.ceph.com/en/latest/cephadm/services/rgw/). 
-Для хранения медиа используется replicated pool с размером `3` [[9]](https://docs.ceph.com/en/reef/rados/operations/pools/).
-
-Для `Ceph` полезный объём медиа из предыдущих расчётов: `≈ 368.64 TB`.
+Для `Ceph`:
 
 `368.64 TB * 3 = 1105.92 TB raw`
 
-Пул `ceph-osd-storage` даёт:
-
 `15 * 12 * 8 TB = 1440 TB raw`
 
-### Kubernetes: контейнеры и аллокация ресурсов
+### Kubernetes containers
 
-Ресурсы указаны в формате `request / limit`.
+Ресурсы указаны в формате `request / limit` [[2]](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/).
 
-| Deployment      | Реплики |          CPU |             RAM | Размещение         | Назначение                           |
-|-----------------|--------:|-------------:|----------------:|--------------------|--------------------------------------|
-| `nginx-ingress` |     `3` |      `4 / 8` |      `4 / 8 GB` | `k8s-ingress-pool` | SSL termination, L7 routing          |
-| `web-frontend`  |     `3` | `0.25 / 0.5` |  `256 / 512 MB` | `k8s-app-pool`     | web-приложение / SPA                 |
-| `api-gateway`   |    `14` |    `1.5 / 3` |    `1.5 / 3 GB` | `k8s-app-pool`     | маршрутизация API-запросов           |
-| `auth-service`  |     `8` |      `1 / 2` |      `1 / 2 GB` | `k8s-app-pool`     | авторизация и сессии                 |
-| `buyer-api`     |    `18` |      `2 / 4` |      `2 / 4 GB` | `k8s-app-pool`     | поиск, карточка, избранное, checkout |
-| `seller-api`    |     `3` |      `1 / 2` |      `1 / 2 GB` | `k8s-app-pool`     | управление товарами и ценами         |
-| `media-api`     |     `3` |      `1 / 2` |      `2 / 4 GB` | `k8s-app-pool`     | загрузка изображений                 |
-| `media-worker`  |    `16` |      `2 / 4` |      `2 / 4 GB` | `k8s-app-pool`     | обработка изображений                |
-| `pgbouncer`     |     `6` |    `0.5 / 1` | `512 MB / 1 GB` | `k8s-app-pool`     | пул соединений к PostgreSQL          |
+| Группа     | Контейнеры                                                            |     Pods |          CPU req/lim |             RAM req/lim | Пул                |
+|------------|-----------------------------------------------------------------------|---------:|---------------------:|------------------------:|--------------------|
+| `ingress`  | `nginx-ingress`                                                       |      `3` |            `12 / 24` |            `12 / 24 GB` | `k8s-ingress-pool` |
+| `frontend` | `web-frontend`                                                        |      `3` |         `0.75 / 1.5` |         `0.75 / 1.5 GB` | `k8s-app-pool`     |
+| `api`      | `api-gateway`, `auth-service`, `buyer-api`, `seller-api`, `media-api` |     `46` |           `71 / 142` |           `74 / 148 GB` | `k8s-app-pool`     |
+| `workers`  | `media-worker`                                                        |     `16` |            `32 / 64` |            `32 / 64 GB` | `k8s-app-pool`     |
+| `db-proxy` | `pgbouncer`                                                           |      `6` |              `3 / 6` |              `3 / 6 GB` | `k8s-app-pool`     |
+| **Итого**  | —                                                                     | **`74`** | **`118.75 / 237.5`** | **`121.75 / 243.5 GB`** | —                  |
 
 ### Суммарная аллокация Kubernetes
 
-| Пул                | Серверы | Ресурсы пула            | Requests                      | Limits                      | Запас по requests             |
-|--------------------|--------:|-------------------------|-------------------------------|-----------------------------|-------------------------------|
-| `k8s-ingress-pool` |     `3` | `48 vCPU / 96 GB RAM`   | `12 vCPU / 12 GB RAM`         | `24 vCPU / 24 GB RAM`       | `36 vCPU / 84 GB RAM`         |
-| `k8s-app-pool`     |     `6` | `192 vCPU / 768 GB RAM` | `106.75 vCPU / 109.75 GB RAM` | `213.5 vCPU / 219.5 GB RAM` | `85.25 vCPU / 658.25 GB RAM`  |
-| **Итого**          |     `9` | `240 vCPU / 864 GB RAM` | `118.75 vCPU / 121.75 GB RAM` | `237.5 vCPU / 243.5 GB RAM` | `121.25 vCPU / 742.25 GB RAM` |
+| Пул                | Серверы | Ресурсы пула                | Requests                          | Limits                          | Запас по requests                 |
+|--------------------|--------:|-----------------------------|-----------------------------------|---------------------------------|-----------------------------------|
+| `k8s-ingress-pool` |     `3` | `48 vCPU / 96 GB RAM`       | `12 vCPU / 12 GB RAM`             | `24 vCPU / 24 GB RAM`           | `36 vCPU / 84 GB RAM`             |
+| `k8s-app-pool`     |     `6` | `192 vCPU / 768 GB RAM`     | `106.75 vCPU / 109.75 GB RAM`     | `213.5 vCPU / 219.5 GB RAM`     | `85.25 vCPU / 658.25 GB RAM`      |
+| **Итого**          | **`9`** | **`240 vCPU / 864 GB RAM`** | **`118.75 vCPU / 121.75 GB RAM`** | **`237.5 vCPU / 243.5 GB RAM`** | **`121.25 vCPU / 742.25 GB RAM`** |
 
-### Правила размещения pod'ов
+### Правила размещения
 
-- `nginx-ingress` по одному pod'у на ingress-узел;
-- `buyer-api`, `api-gateway`, `auth-service` равномерно по app-worker узлам;
-- `media-worker` масштабирование по длине очереди `media_tasks` в Kafka;
-- `pgbouncer` минимум в трёх fault domain;
-- для критичных сервисов используются `topologySpreadConstraints`, `podAntiAffinity`, `readinessProbe`, `livenessProbe`;
-- stateful-компоненты не смешиваются с Kubernetes worker-пулами.
+| Правило                                                                           | Назначение                                                                                                                                                                            |
+|-----------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `nginx-ingress` — по одному pod'у на ingress-узел                                 | изоляция входного L7-контура                                                                                                                                                          |
+| `buyer-api`, `api-gateway`, `auth-service` — равномерно по app-worker узлам       | распределение основной API-нагрузки                                                                                                                                                   |
+| `media-worker` масштабируется по длине очереди `media_tasks`                      | обработка изображений зависит от backlog в Kafka                                                                                                                                      |
+| `pgbouncer` размещается минимум в трёх fault domain                               | доступность пула соединений к PostgreSQL                                                                                                                                              |
+| `topologySpreadConstraints`, `podAntiAffinity`, `readinessProbe`, `livenessProbe` | равномерное размещение, отказоустойчивость и исключение неготовых pod'ов из балансировки [[10]](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) |
+| stateful-компоненты не смешиваются с Kubernetes worker-пулами                     | диски и репликация управляются отдельными серверными пулами                                                                                                                           |
 
 ### Итоговое количество серверов
 
@@ -972,12 +968,13 @@ Buyer API, Redis Cluster `search_cache`.
 
 ### Источники
 
-1. https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers   
-2. https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/  
+1. https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers  
+2. https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/  
 3. https://www.postgresql.org/docs/current/high-availability.html  
-4. https://patroni.readthedocs.io/
+4. https://patroni.readthedocs.io/  
 5. https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-health/  
 6. https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/  
 7. https://kafka.apache.org/42/design/design/  
 8. https://docs.ceph.com/en/latest/cephadm/services/rgw/  
 9. https://docs.ceph.com/en/reef/rados/operations/pools/  
+10. https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/    
